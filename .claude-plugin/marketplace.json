@@ -1,0 +1,13 @@
+{
+  "name": "maurelians-claude-marketplace",
+  "owner": {
+    "name": "maurelian"
+  },
+  "plugins": [
+    {
+      "name": "maurelians-skills",
+      "source": "./plugins/maurelians-skills",
+      "version": "0.1.0"
+    }
+  ]
+}
