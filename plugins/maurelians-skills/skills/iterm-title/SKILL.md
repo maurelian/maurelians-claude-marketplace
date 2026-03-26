@@ -25,11 +25,10 @@ Set the iTerm2 tab title for this Claude Code session. Use when you know what th
 
 1. [CLAUDE TASK] Take the argument as the title description. If no argument is provided, infer a short description from the current task context.
 
-2. [CLAUDE TASK] Find and run the script co-located with this skill:
+2. [CLAUDE TASK] Run the co-located script. The script is at `update-iterm-title.sh` relative to this skill's base directory:
 
 ```bash
-SKILL_DIR="$(dirname "$(find ~/.claude/plugins -path '*/iterm-title/update-iterm-title.sh' 2>/dev/null | head -1)" 2>/dev/null)"
-bash "$SKILL_DIR/update-iterm-title.sh" "<description>"
+bash ~/.claude/plugins/marketplaces/maurelians-claude-marketplace/plugins/maurelians-skills/skills/iterm-title/update-iterm-title.sh "<description>"
 ```
 
 3. [CLAUDE TASK] Confirm the title was set.

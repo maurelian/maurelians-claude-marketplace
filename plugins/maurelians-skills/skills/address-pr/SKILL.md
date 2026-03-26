@@ -23,17 +23,10 @@ Automates addressing pull request review feedback: analyze comments, make fixes,
 
 ## Setup
 
-1. [CLAUDE TASK] Resolve the skill's script directory. The helper scripts are co-located with this skill:
+The helper scripts are co-located with this skill at:
+`~/.claude/plugins/marketplaces/maurelians-claude-marketplace/plugins/maurelians-skills/skills/address-pr/`
 
-```bash
-SKILL_DIR="$(dirname "$(find ~/.claude/plugins -path '*/address-pr/gh-pr-threads.sh' 2>/dev/null | head -1)" 2>/dev/null)"
-if [[ -z "$SKILL_DIR" ]]; then
-  echo "Error: address-pr scripts not found. Is the maurelians-skills plugin installed?" >&2
-  exit 1
-fi
-```
-
-Store `SKILL_DIR` for use in subsequent steps. All commands that use `$SKILL_DIR` must include the export inline (Claude has no persistent shell state).
+Use this as `SKILL_DIR` in subsequent steps. Since Claude has no persistent shell state, inline it with each command.
 
 ## Step 1: Validate Input
 
