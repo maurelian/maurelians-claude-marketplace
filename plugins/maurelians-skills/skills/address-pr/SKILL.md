@@ -28,7 +28,7 @@ Automates addressing pull request review feedback: analyze comments, make fixes,
 ```bash
 SKILL_DIR="$(dirname "$(find ~/.claude/plugins -path '*/address-pr/gh-pr-threads.sh' 2>/dev/null | head -1)" 2>/dev/null)"
 if [[ -z "$SKILL_DIR" ]]; then
-  echo "Error: address-pr scripts not found. Is the op-eng-skills plugin installed?" >&2
+  echo "Error: address-pr scripts not found. Is the maurelians-skills plugin installed?" >&2
   exit 1
 fi
 ```

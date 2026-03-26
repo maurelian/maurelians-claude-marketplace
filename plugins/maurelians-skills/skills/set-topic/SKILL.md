@@ -28,7 +28,7 @@ The status line shows: task label, model, repo, worktree, and context usage %.
 
 1. [CLAUDE TASK] Find the setter script. Look in these locations (in order):
    - `scripts/hooks/set-statusline-task.sh` (relative to project root, for op-claude users)
-   - The op-eng-skills plugin scripts directory
+   - The maurelians-skills plugin scripts directory
    - `~/.claude/hooks/set-statusline-task.sh`
 
 2. [CLAUDE TASK] Determine the task label:

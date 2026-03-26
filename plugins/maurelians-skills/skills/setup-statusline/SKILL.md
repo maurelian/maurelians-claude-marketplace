@@ -19,8 +19,8 @@ task label, model, repo/worktree, session ID, and context usage %.
 
 1. [CLAUDE TASK] Find the statusline scripts. Look for `statusline-command.sh` and
    `set-statusline-task.sh` in these locations (in order):
-   - The op-eng-skills plugin: search for files named `statusline-command.sh` under
-     any directory matching `*/op-eng-skills/scripts/`
+   - The maurelians-skills plugin: search for files named `statusline-command.sh` under
+     any directory matching `*/maurelians-skills/scripts/`
    - The current project: `scripts/hooks/statusline-command.sh`
    - `~/.claude/statusline-command.sh` (already installed)
 
