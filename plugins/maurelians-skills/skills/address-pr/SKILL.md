@@ -15,6 +15,7 @@ Automates addressing pull request review feedback: analyze comments, make fixes,
 - Filter out your own previous comments when analyzing review threads
 - Commit and push changes before replying to review comments
 - Claude has no persistent shell state — bundle environment variable exports with commands using `&&`
+- **Always link to a thread or comment when you mention it.** Use the format `https://github.com/{owner}/{repo}/pull/{PR}#discussion_r{DATABASE_ID}` with the `database_id` field from `gh-pr-threads.sh` output (not the GraphQL `id`). This applies in every user-facing message that references a thread: summaries, progress updates, wrap-ups, disagreement prompts, and inline mentions. Preferred markdown forms: `[discussion_r{id}](URL)` for compact references, or `[file.go:LINE](URL)` when the file+line is more useful to the reader.
 
 ## Prerequisites
 
@@ -65,7 +66,10 @@ For each unresolved thread from the script output:
    - **Question** — requires explanation only, no code change
    - **Disagree/Won't fix** — ASK USER before responding
 
-6. [CLAUDE TASK] Present a summary to the user showing the number of comments found, file paths affected, and a brief description of each comment.
+6. [CLAUDE TASK] Present a summary to the user. For each thread, include:
+   - A clickable link to the comment in the form `[file.go:LINE](https://github.com/{owner}/{repo}/pull/{PR}#discussion_r{database_id})` or `[discussion_r{database_id}](URL)` — never just the ID without a link
+   - The reviewer and a brief description of the feedback
+   - The proposed action category (code change, documentation, question, disagree)
 
 **IMPORTANT**: For any comment where you disagree or think "won't fix" is appropriate, use AskUserQuestion to get user confirmation before replying. Never auto-resolve disagreements.
 
@@ -106,10 +110,10 @@ For each category of comment requiring action:
 
 1. [CLAUDE TASK] Present a summary to the user:
 
-- Number of comments addressed
+- Comments addressed, each with its link to `discussion_r{database_id}` (see CRITICAL REQUIREMENTS for format)
 - Files modified
 - Commit hash created
-- Comments that were NOT addressed (with reasons)
+- Comments that were NOT addressed, each with its link and the reason
 - Link to the PR
 
 ## Error Handling
