@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""Shared-pane collaboration between a Claude Code session and its sibling herdr pane.
+
+Subcommands: resolve, enable, read, send, status, disable, hook, cleanup.
+The `hook` subcommand is wired to UserPromptSubmit and injects output the agent
+has not seen yet; it stays silent unless `enable` has written a state file.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+STATE_DIR = os.path.join(
+    os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude")),
+    "state",
+    "herdr-collab",
+)
+READ_SOURCE = "recent-unwrapped"
+READ_LINES = "2000"
+MAX_DELTA_LINES = 200
+MAX_DELTA_CHARS = 8000
+STALE_AFTER_SECONDS = 12 * 60 * 60
+OVERFLOW_WARNING = (
+    "⚠ output overflowed herdr's snapshot window — earlier lines are lost "
+    "and cannot be recovered"
+)
+
+
+class Failure(Exception):
+    """Condition to report to the caller rather than a crash."""
+
+
+def herdr_bin():
+    found = shutil.which("herdr")
+    if found:
+        return found
+    for candidate in ("/opt/homebrew/bin/herdr", "/usr/local/bin/herdr"):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    raise Failure("herdr is not on PATH")
+
+
+def herdr(*args, check=True):
+    proc = subprocess.run(
+        [herdr_bin(), *args], capture_output=True, text=True, timeout=10
+    )
+    if check and proc.returncode != 0:
+        raise Failure(
+            f"herdr {' '.join(args)} failed: {(proc.stderr or proc.stdout).strip()}"
+        )
+    return proc.stdout
+
+
+def herdr_json(*args):
+    payload = json.loads(herdr(*args))
+    if "error" in payload:
+        raise Failure(f"herdr {' '.join(args)}: {payload['error'].get('message')}")
+    return payload["result"]
+
+
+def agent_pane_id():
+    pane = os.environ.get("HERDR_PANE_ID")
+    if not pane:
+        raise Failure(
+            "HERDR_PANE_ID is unset — this session is not running inside a herdr pane"
+        )
+    return pane
+
+
+def state_path(pane_id):
+    return os.path.join(STATE_DIR, pane_id.replace(":", "-") + ".json")
+
+
+def log_path(pane_id):
+    return os.path.join(STATE_DIR, pane_id.replace(":", "-") + ".log")
+
+
+def load_state(pane_id):
+    try:
+        with open(state_path(pane_id)) as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def save_state(state):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    path = state_path(state["agent_pane"])
+    tmp = path + ".tmp"
+    with open(tmp, "w") as handle:
+        json.dump(state, handle)
+    os.replace(tmp, path)
+
+
+def clear_state(pane_id):
+    for path in (state_path(pane_id), state_path(pane_id) + ".tmp"):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def panes():
+    return herdr_json("pane", "list")["panes"]
+
+
+def siblings(pane_id):
+    """Panes sharing this pane's tab, nearest-neighbour semantics for the skill."""
+    all_panes = panes()
+    me = next((p for p in all_panes if p["pane_id"] == pane_id), None)
+    if me is None:
+        raise Failure(f"pane {pane_id} is not in the current herdr session")
+    return me, [
+        p
+        for p in all_panes
+        if p["tab_id"] == me["tab_id"] and p["pane_id"] != pane_id
+    ]
+
+
+def foreground_command(pane_id):
+    """Command occupying the pane, or None when it is sitting at the shell prompt."""
+    info = herdr_json("pane", "process-info", "--pane", pane_id)["process_info"]
+    if info.get("foreground_process_group_id") == info.get("shell_pid"):
+        return None
+    running = info.get("foreground_processes") or []
+    for proc in running:
+        if proc.get("pid") != info.get("shell_pid"):
+            return proc.get("cmdline") or proc.get("name")
+    return running[0].get("cmdline") if running else "unknown command"
+
+
+def snapshot(pane_id):
+    text = herdr("pane", "read", pane_id, "--source", READ_SOURCE, "--lines", READ_LINES)
+    lines = [line.rstrip() for line in text.splitlines()]
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def delta(prev, new):
+    """New lines in `new`, plus whether the snapshot window scrolled past unseen output.
+
+    The pane is an append-only window anchored to the newest output, so whatever
+    survives of the previous view is flush with the top of the next snapshot and the
+    longest such overlap is the frontier. The previous view's last line is excluded
+    from the overlap because the shell rewrites it in place as the user types; it gets
+    re-emitted once, carrying the command they typed onto it.
+
+    No overlap at all means the previous view scrolled away entirely and output between
+    the two reads is unrecoverable.
+    """
+    if len(prev) < 2 or not new:
+        return new, False
+    if prev == new:
+        return [], False
+    stable = prev[:-1]
+    for size in range(min(len(stable), len(new)), 0, -1):
+        if new[:size] == stable[-size:]:
+            return new[size:], False
+    return new, True
+
+
+def truncate(lines):
+    """Trim from the head so the tail — the most recent output — always survives."""
+    truncated = False
+    if len(lines) > MAX_DELTA_LINES:
+        lines = lines[-MAX_DELTA_LINES:]
+        truncated = True
+    while lines and len("\n".join(lines)) > MAX_DELTA_CHARS:
+        lines = lines[1:]
+        truncated = True
+    if truncated:
+        lines = ["[…earlier lines trimmed; see the herdr-collab log…]"] + lines
+    return lines
+
+
+def append_log(pane_id, lines):
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(log_path(pane_id), "a") as handle:
+            handle.write(f"\n--- {stamp} ---\n")
+            handle.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+def render(shared, lines, overflowed):
+    body = "\n".join(truncate(lines))
+    if overflowed:
+        body = OVERFLOW_WARNING + "\n" + body
+    return (
+        f'<herdr-shared-pane pane="{shared["pane_id"]}" cwd="{shared.get("cwd", "")}">\n'
+        f"{body}\n"
+        "</herdr-shared-pane>"
+    )
+
+
+def collect(state, shared):
+    """Delta since the last read, advancing the stored cursor."""
+    lines = snapshot(shared["pane_id"])
+    new_lines, overflowed = delta(state.get("snapshot") or [], lines)
+    state["snapshot"] = lines
+    save_state(state)
+    if new_lines:
+        append_log(state["agent_pane"], new_lines)
+    return new_lines, overflowed
+
+
+def require_enabled(pane_id):
+    state = load_state(pane_id)
+    if not state:
+        raise Failure(
+            "shared-pane collaboration is not enabled — run the herdr-collab skill first"
+        )
+    return state
+
+
+def resolve_shared(state):
+    _, sibs = siblings(state["agent_pane"])
+    shared = next((p for p in sibs if p["pane_id"] == state["shared_pane"]), None)
+    if shared is None:
+        raise Failure(f"shared pane {state['shared_pane']} is gone")
+    return shared
+
+
+# --- subcommands ---------------------------------------------------------------
+
+
+def cmd_resolve(_argv):
+    pane_id = agent_pane_id()
+    me, sibs = siblings(pane_id)
+    print(
+        json.dumps(
+            {
+                "agent_pane": pane_id,
+                "tab": me["tab_id"],
+                "workspace": me["workspace_id"],
+                "cwd": me.get("cwd"),
+                "enabled": load_state(pane_id) is not None,
+                "siblings": [
+                    {
+                        "pane_id": p["pane_id"],
+                        "title": p.get("terminal_title_stripped"),
+                        "cwd": p.get("cwd"),
+                        "hosts_agent": p.get("agent"),
+                        "busy": foreground_command(p["pane_id"]),
+                    }
+                    for p in sibs
+                ],
+                "split_command": (
+                    f"herdr pane split {pane_id} --direction right --ratio 0.4 "
+                    f"--no-focus --cwd {me.get('cwd', '.')}"
+                ),
+            },
+            indent=2,
+        )
+    )
+
+
+def cmd_enable(argv):
+    pane_id = agent_pane_id()
+    _, sibs = siblings(pane_id)
+    wanted = None
+    if "--pane" in argv:
+        wanted = argv[argv.index("--pane") + 1]
+        if not any(p["pane_id"] == wanted for p in sibs):
+            raise Failure(f"{wanted} is not a pane in this tab")
+    elif len(sibs) == 1:
+        wanted = sibs[0]["pane_id"]
+    elif not sibs:
+        raise Failure(
+            "no other pane in this tab — create one with `herdr pane split` first"
+        )
+    else:
+        ids = ", ".join(p["pane_id"] for p in sibs)
+        raise Failure(f"several panes in this tab ({ids}) — pass --pane <id>")
+
+    shared = next(p for p in sibs if p["pane_id"] == wanted)
+    lines = snapshot(wanted)
+    save_state(
+        {
+            "version": 1,
+            "agent_pane": pane_id,
+            "shared_pane": wanted,
+            "enabled_at": time.time(),
+            "snapshot": lines,
+        }
+    )
+    print(f"shared pane: {wanted} ({shared.get('terminal_title_stripped')})")
+    print(f"cwd: {shared.get('cwd')}")
+    print("new output will be injected automatically after each user prompt.")
+    if lines:
+        print("\ncurrent contents:")
+        print("\n".join(truncate(lines)))
+
+
+def cmd_read(_argv):
+    pane_id = agent_pane_id()
+    state = require_enabled(pane_id)
+    shared = resolve_shared(state)
+    lines, overflowed = collect(state, shared)
+    print(render(shared, lines, overflowed) if lines else "no new output")
+
+
+def cmd_send(argv):
+    if not argv:
+        raise Failure("nothing to send")
+    text = " ".join(argv)
+    pane_id = agent_pane_id()
+    state = require_enabled(pane_id)
+    shared = resolve_shared(state)
+    busy = foreground_command(shared["pane_id"])
+    if busy:
+        raise Failure(
+            f"{shared['pane_id']} is busy running `{busy}` — not sending. "
+            "Wait for it to finish or ask the user."
+        )
+    herdr("pane", "send-text", shared["pane_id"], text)
+    herdr("pane", "send-keys", shared["pane_id"], "enter")
+    print(f"sent to {shared['pane_id']}: {text}")
+
+
+def cmd_status(_argv):
+    pane_id = agent_pane_id()
+    state = load_state(pane_id)
+    if not state:
+        print(f"disabled (agent pane {pane_id})")
+        return
+    print(f"enabled: {pane_id} → {state['shared_pane']}")
+    print(f"cursor: {len(state.get('snapshot') or [])} lines")
+    print(f"log: {log_path(pane_id)}")
+
+
+def cmd_disable(_argv):
+    pane_id = agent_pane_id()
+    clear_state(pane_id)
+    print(f"shared-pane collaboration disabled for {pane_id}")
+
+
+def cmd_cleanup(_argv):
+    pane = os.environ.get("HERDR_PANE_ID")
+    if pane:
+        clear_state(pane)
+
+
+def cmd_hook(_argv):
+    """UserPromptSubmit injection. Never fails loudly; a broken pane must not block a prompt."""
+    sys.stdin.read()
+    pane_id = os.environ.get("HERDR_PANE_ID")
+    if not pane_id:
+        return
+    state = load_state(pane_id)
+    if not state:
+        return
+    if time.time() - state.get("enabled_at", 0) > STALE_AFTER_SECONDS:
+        clear_state(pane_id)
+        return
+    try:
+        shared = resolve_shared(state)
+    except Failure:
+        clear_state(pane_id)
+        emit(
+            f"herdr shared pane {state['shared_pane']} is gone; "
+            "shared-pane collaboration is now off."
+        )
+        return
+    lines, overflowed = collect(state, shared)
+    if lines:
+        emit(render(shared, lines, overflowed))
+
+
+def emit(context):
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": context,
+                }
+            }
+        )
+    )
+
+
+COMMANDS = {
+    "resolve": cmd_resolve,
+    "enable": cmd_enable,
+    "read": cmd_read,
+    "send": cmd_send,
+    "status": cmd_status,
+    "disable": cmd_disable,
+    "hook": cmd_hook,
+    "cleanup": cmd_cleanup,
+}
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in COMMANDS:
+        print(f"usage: herdr-collab.py {{{'|'.join(COMMANDS)}}}", file=sys.stderr)
+        return 2
+    name, rest = argv[0], argv[1:]
+    silent = name in ("hook", "cleanup")
+    try:
+        COMMANDS[name](rest)
+    except Exception as err:  # noqa: BLE001 - hooks must never break the prompt
+        if silent:
+            return 0
+        print(f"herdr-collab: {err}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

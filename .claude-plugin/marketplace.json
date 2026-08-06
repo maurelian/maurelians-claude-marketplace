@@ -8,6 +8,11 @@
       "name": "maurelians-skills",
       "source": "./plugins/maurelians-skills",
       "version": "0.1.0"
+    },
+    {
+      "name": "herdr-collab",
+      "source": "./plugins/herdr-collab",
+      "version": "0.1.0"
     }
   ]
 }
