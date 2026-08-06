@@ -28,6 +28,14 @@ OVERFLOW_WARNING = (
     "⚠ output overflowed herdr's snapshot window — earlier lines are lost "
     "and cannot be recovered"
 )
+REDRAW_NOTICE = (
+    "note: the pane was resized, which reflows every line and loses the anchor. "
+    "Nothing was lost; this is the current view, most of it already seen"
+)
+REDRAW_TAIL_LINES = 20
+WAIT_GRACE_SECONDS = 1.0
+WAIT_POLL_SECONDS = 0.3
+WAIT_TIMEOUT_SECONDS = 120.0
 
 
 class Failure(Exception):
@@ -133,6 +141,15 @@ def foreground_command(pane_id):
     return running[0].get("cmdline") if running else "unknown command"
 
 
+def pane_width(pane_id):
+    """Column count, which the text anchor depends on: a resize redraws the whole pane."""
+    layout = herdr_json("pane", "layout", "--pane", pane_id)["layout"]
+    for pane in layout.get("panes", []):
+        if pane["pane_id"] == pane_id:
+            return pane["rect"]["width"]
+    return None
+
+
 def snapshot(pane_id):
     text = herdr("pane", "read", pane_id, "--source", READ_SOURCE, "--lines", READ_LINES)
     lines = [line.rstrip() for line in text.splitlines()]
@@ -189,10 +206,10 @@ def append_log(pane_id, lines):
         pass
 
 
-def render(shared, lines, overflowed):
+def render(shared, lines, notice):
     body = "\n".join(truncate(lines))
-    if overflowed:
-        body = OVERFLOW_WARNING + "\n" + body
+    if notice:
+        body = notice + "\n" + body
     return (
         f'<herdr-shared-pane pane="{shared["pane_id"]}" cwd="{shared.get("cwd", "")}">\n'
         f"{body}\n"
@@ -202,13 +219,26 @@ def render(shared, lines, overflowed):
 
 def collect(state, shared):
     """Delta since the last read, advancing the stored cursor."""
-    lines = snapshot(shared["pane_id"])
-    new_lines, overflowed = delta(state.get("snapshot") or [], lines)
+    pane_id = shared["pane_id"]
+    lines = snapshot(pane_id)
+    width = pane_width(pane_id)
+    new_lines, missed = delta(state.get("snapshot") or [], lines)
+    notice = None
+    if missed:
+        # A resize reflows the whole pane, so losing the anchor says nothing about
+        # whether output was actually lost. Re-showing the whole view would be noise,
+        # but the tail still carries anything that ran alongside the resize.
+        if width != state.get("width"):
+            notice = REDRAW_NOTICE
+            new_lines = new_lines[-REDRAW_TAIL_LINES:]
+        else:
+            notice = OVERFLOW_WARNING
     state["snapshot"] = lines
+    state["width"] = width
     save_state(state)
     if new_lines:
         append_log(state["agent_pane"], new_lines)
-    return new_lines, overflowed
+    return new_lines, notice
 
 
 def require_enabled(pane_id):
@@ -289,6 +319,7 @@ def cmd_enable(argv):
             "shared_pane": wanted,
             "enabled_at": time.time(),
             "snapshot": lines,
+            "width": pane_width(wanted),
         }
     )
     print(f"shared pane: {wanted} ({shared.get('terminal_title_stripped')})")
@@ -303,8 +334,28 @@ def cmd_read(_argv):
     pane_id = agent_pane_id()
     state = require_enabled(pane_id)
     shared = resolve_shared(state)
-    lines, overflowed = collect(state, shared)
-    print(render(shared, lines, overflowed) if lines else "no new output")
+    lines, notice = collect(state, shared)
+    print(render(shared, lines, notice) if lines else "no new output")
+
+
+def cmd_wait(argv):
+    """Block until the pane is back at its shell prompt."""
+    timeout = WAIT_TIMEOUT_SECONDS
+    if "--timeout" in argv:
+        timeout = float(argv[argv.index("--timeout") + 1])
+    state = require_enabled(agent_pane_id())
+    shared = resolve_shared(state)
+    # The shell needs a moment to actually launch what was sent; polling instantly
+    # would see the prompt it has not left yet and call the command finished.
+    time.sleep(min(WAIT_GRACE_SECONDS, timeout))
+    deadline = time.monotonic() + timeout
+    running = foreground_command(shared["pane_id"])
+    while running and time.monotonic() < deadline:
+        time.sleep(WAIT_POLL_SECONDS)
+        running = foreground_command(shared["pane_id"])
+    if running:
+        raise Failure(f"still running `{running}` after {timeout:g}s")
+    print(f"{shared['pane_id']} is back at a prompt")
 
 
 def cmd_send(argv):
@@ -369,9 +420,9 @@ def cmd_hook(_argv):
             "shared-pane collaboration is now off."
         )
         return
-    lines, overflowed = collect(state, shared)
+    lines, notice = collect(state, shared)
     if lines:
-        emit(render(shared, lines, overflowed))
+        emit(render(shared, lines, notice))
 
 
 def emit(context):
@@ -392,6 +443,7 @@ COMMANDS = {
     "enable": cmd_enable,
     "read": cmd_read,
     "send": cmd_send,
+    "wait": cmd_wait,
     "status": cmd_status,
     "disable": cmd_disable,
     "hook": cmd_hook,

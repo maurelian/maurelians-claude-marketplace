@@ -57,16 +57,28 @@ something the user showed on purpose, and react to it.
 To look mid-turn — after sending a command, say:
 
 ```bash
+python3 "$S" wait                        # blocks until the pane is back at a prompt
 python3 "$S" read                        # delta since last look, advances the cursor
-herdr pane wait-output wN:p2 --regex 'done|error' --timeout 30000
 ```
 
 `read` shares its cursor with the hook, so nothing is seen twice.
+
+Use `wait` rather than `herdr pane wait-output --regex …` to tell that a command
+finished. A regex matches the echoed command line as readily as the result, so it fires
+early on a hit and burns its whole timeout on a miss; `wait` watches the pane's
+foreground process instead, which is what "finished" actually means.
+
+Never `wait` on an interactive program — lazygit, vim, less, a REPL. They hold the
+foreground until the user quits, so it blocks to its timeout. Just `read` instead.
 
 **If a block carries `⚠ output overflowed`,** more than herdr's ~1000-line snapshot
 window went by between two reads and the earlier part no longer exists anywhere. Say so
 before drawing conclusions, and ask the user to re-run into a file if the missing part
 matters. Never present a truncated log as the whole story.
+
+**If it carries `note: the pane was resized`,** the user changed the pane's width, which
+reflows every line and loses the text anchor. Nothing was lost — the block just repeats
+content already seen, so re-read it rather than reacting to it as new.
 
 Blocks are capped at 200 lines to keep the context sane; every delta is appended in full
 to `~/.claude/state/herdr-collab/<pane>.log`, so read that when the trimmed head matters.

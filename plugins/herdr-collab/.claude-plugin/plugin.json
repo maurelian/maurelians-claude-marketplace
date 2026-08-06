@@ -1,7 +1,7 @@
 {
   "name": "herdr-collab",
   "description": "Share a herdr pane with Claude — unread pane output is injected on each prompt, and Claude can type commands back",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "maurelian"
   }
