@@ -1,6 +1,6 @@
 ---
 name: herdr-collab
-description: Share the sibling herdr pane with the user as a live workspace. New output in that pane is injected automatically on every prompt, and Claude can type commands into it. Use when the user says "share this pane", "watch my pane", "read the other pane", "work with me in the terminal", "collaborate in the shared pane", or asks Claude to run something in their own terminal instead of a tool call.
+description: Share the sibling herdr pane with the user as a live workspace. New output in that pane is injected automatically on every prompt, and Claude can type commands into it. Use when the user says "share this pane", "watch my pane", "read the other pane", "work with me in the terminal", "collaborate in the shared pane", references the "sib pane)" or asks Claude to run something in their own terminal instead of a tool call.
 ---
 
 # herdr shared pane

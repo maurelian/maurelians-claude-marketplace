@@ -16,6 +16,6 @@ claude plugin install maurelians-skills --scope user
 | Skill | Description |
 |-------|-------------|
 | `/address-pr <number>` | Address PR review comments — fetches unresolved threads, makes fixes, replies, and resolves |
-| `/iterm-title <description>` | Set the iTerm2 tab title for the current session |
+| `/space-name <description>` | Rename the current herdr space to describe this session |
 | `/set-topic <description>` | Set the status line task label (shown in Claude Code status bar) |
 | `/setup-statusline` | One-time setup to configure the Claude Code status line |
