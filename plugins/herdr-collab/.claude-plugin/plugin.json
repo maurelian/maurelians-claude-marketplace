@@ -1,7 +1,7 @@
 {
   "name": "herdr-collab",
-  "description": "Share a herdr pane with Claude — unread pane output is injected on each prompt, and Claude can type commands back",
-  "version": "0.2.0",
+  "description": "Share a herdr pane with Claude — unread pane output is injected on each prompt, Claude can type commands back, and it can spawn nested worktree child workspaces",
+  "version": "0.3.0",
   "author": {
     "name": "maurelian"
   }

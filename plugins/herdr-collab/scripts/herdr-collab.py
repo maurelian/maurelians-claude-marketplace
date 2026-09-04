@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shared-pane collaboration between a Claude Code session and its sibling herdr pane.
 
-Subcommands: resolve, enable, read, send, status, disable, hook, cleanup.
+Subcommands: resolve, child, enable, read, send, wait, status, disable, hook, cleanup.
 The `hook` subcommand is wired to UserPromptSubmit and injects output the agent
 has not seen yet; it stays silent unless `enable` has written a state file.
 """
@@ -36,6 +36,7 @@ REDRAW_TAIL_LINES = 20
 WAIT_GRACE_SECONDS = 1.0
 WAIT_POLL_SECONDS = 0.3
 WAIT_TIMEOUT_SECONDS = 120.0
+CHILD_SPLIT_RATIO = "0.4"
 
 
 class Failure(Exception):
@@ -127,6 +128,69 @@ def siblings(pane_id):
         for p in all_panes
         if p["tab_id"] == me["tab_id"] and p["pane_id"] != pane_id
     ]
+
+
+def workspace_of(pane_id):
+    return herdr_json("pane", "get", pane_id)["pane"]["workspace_id"]
+
+
+def agent_name(*candidates):
+    """First candidate herdr will accept: lowercase, [a-z0-9_-], starting with a letter."""
+    for candidate in candidates:
+        if not candidate:
+            continue
+        slug = "".join(
+            char if char.isalnum() or char in "-_" else "-"
+            for char in candidate.lower()
+        ).strip("-")
+        slug = slug[:32].rstrip("-")
+        while slug and not slug[0].isalpha():
+            slug = slug[1:]
+        if slug:
+            return slug
+    return "agent"
+
+
+def agent_status(pane_id):
+    """Reported status of the agent in a pane, or None when no agent is detected."""
+    try:
+        return herdr_json("agent", "get", pane_id)["agent"].get("agent_status")
+    except Failure:
+        return None
+
+
+def own_agent_kind():
+    """Agent kind running this session, so a child defaults to the same kind as its parent."""
+    try:
+        kind = herdr_json("agent", "get", agent_pane_id())["agent"].get("agent")
+    except Failure:
+        kind = None
+    if not kind:
+        raise Failure(
+            "could not tell which agent is running this session, so there is no kind "
+            "to inherit — pass --agent KIND"
+        )
+    return kind
+
+
+def opt_flag(argv, name):
+    """(present, value) for a flag whose value may be left off to be inferred."""
+    if name not in argv:
+        return False, None
+    index = argv.index(name) + 1
+    if index < len(argv) and not argv[index].startswith("--"):
+        return True, argv[index]
+    return True, None
+
+
+def flag_value(argv, name):
+    """Value following `name`, or None. Matches the ad-hoc parsing the other commands use."""
+    if name not in argv:
+        return None
+    index = argv.index(name) + 1
+    if index >= len(argv):
+        raise Failure(f"{name} needs a value")
+    return argv[index]
 
 
 def foreground_command(pane_id):
@@ -292,6 +356,104 @@ def cmd_resolve(_argv):
     )
 
 
+def cmd_child(argv):
+    """Create a worktree child of this workspace, optionally with an agent and a shell.
+
+    herdr only indents worktree children in the sidebar, so a "sub workspace" is always
+    a real Git worktree on its own branch — there is no way to nest two unrelated
+    workspaces, and no call that reparents an existing one.
+    """
+    pane_id = agent_pane_id()
+    workspace = workspace_of(pane_id)
+
+    branch = flag_value(argv, "--branch")
+    base = flag_value(argv, "--base")
+    label = flag_value(argv, "--label")
+    want_agent, kind = opt_flag(argv, "--agent")
+    task = flag_value(argv, "--task")
+    want_split = "--split" in argv
+    focus = "--focus" in argv
+
+    # A task is only ever for an agent, so asking for one implies asking for the other.
+    if task:
+        want_agent = True
+    # Default to whatever is running this session: a child of a Claude session should be
+    # another Claude unless the user says otherwise.
+    if want_agent and not kind:
+        kind = own_agent_kind()
+
+    args = ["worktree", "create", "--workspace", workspace]
+    for name, value in (("--branch", branch), ("--base", base), ("--label", label)):
+        if value:
+            args += [name, value]
+    args.append("--focus" if focus else "--no-focus")
+
+    try:
+        created = herdr_json(*args)
+    except Failure as err:
+        if "Git work tree" in str(err):
+            raise Failure(
+                f"workspace {workspace} is not inside a Git work tree, so it cannot "
+                "parent a child — herdr nests worktree children only"
+            ) from err
+        raise
+
+    root = created["root_pane"]["pane_id"]
+    checkout = created["worktree"]["path"]
+    summary = {
+        "workspace": created["workspace"]["workspace_id"],
+        "label": created["workspace"]["label"],
+        "branch": created["worktree"]["branch"],
+        "checkout": checkout,
+        "root_pane": root,
+        "parent_workspace": workspace,
+    }
+
+    # Split first: a TUI agent launched at its final size avoids the full-buffer reflow
+    # that splitting afterwards would force on it.
+    if want_split:
+        split = herdr_json(
+            "pane", "split", root, "--direction", "right",
+            "--ratio", CHILD_SPLIT_RATIO, "--no-focus", "--cwd", checkout,
+        )
+        summary["shell_pane"] = split["pane"]["pane_id"]
+
+    if want_agent:
+        # The pane id doubles as an agent target, which sidesteps having to invent a
+        # unique agent name just to prompt the thing we already have a handle on.
+        name = agent_name(label, branch, summary["workspace"])
+        try:
+            herdr("agent", "start", name, "--kind", kind, "--pane", root)
+        except Failure as err:
+            # A fresh checkout is a folder the agent has never seen, so Claude Code
+            # opens its trust question and `agent start` reports it as not ready. The
+            # agent is up and waiting on the user, which is not a failure to create.
+            if agent_status(root) is None:
+                # The worktree is already on disk by now. Rolling it back would delete
+                # a real branch and checkout, so report what exists instead.
+                raise Failure(
+                    f"{err}\nthe child workspace was still created: "
+                    f"{summary['workspace']} at {checkout} — remove it with "
+                    f"`herdr worktree remove --workspace {summary['workspace']}`"
+                ) from err
+
+        status = agent_status(root)
+        summary["agent"] = {"kind": kind, "name": name, "pane": root, "status": status}
+        if task:
+            if status == "blocked":
+                summary["agent"]["task_pending"] = task
+                summary["agent"]["note"] = (
+                    "agent is blocked on a question in its pane and cannot take the "
+                    f"task yet; answer it, then run `herdr agent prompt {root} "
+                    "'<task>'`"
+                )
+            else:
+                herdr("agent", "prompt", root, task)
+                summary["agent"]["task"] = task
+
+    print(json.dumps(summary, indent=2))
+
+
 def cmd_enable(argv):
     pane_id = agent_pane_id()
     _, sibs = siblings(pane_id)
@@ -440,6 +602,7 @@ def emit(context):
 
 COMMANDS = {
     "resolve": cmd_resolve,
+    "child": cmd_child,
     "enable": cmd_enable,
     "read": cmd_read,
     "send": cmd_send,
