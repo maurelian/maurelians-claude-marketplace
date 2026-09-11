@@ -10,29 +10,37 @@ Creates the indented row beneath the current workspace in herdr's sidebar, in on
 The thing to understand first: **herdr only nests worktree children.** A "sub workspace"
 is always a real Git worktree on its own branch — there is no generic parent/child
 relationship, no flag to nest two unrelated workspaces, and no call that reparents an
-existing one. So this skill creates a branch and a checkout every time. That is a write,
-not a view.
+existing one. So nesting means creating a branch and a checkout — a write, not a view.
+Outside a repo there is nothing to nest, and the command creates a top-level space
+instead of failing (see Requirements).
 
 ## Requirements
 
-The current workspace must be inside a Git work tree. If it isn't, the script says so
-and there is no fallback — a non-repo workspace can never have children.
+Nesting needs the current workspace to be inside a Git work tree, because the child
+*is* a worktree. When it isn't, the script does not fail: it creates a **top-level**
+space in the same directory instead, with the same panes, agent and task, and says so
+in the summary (`"nesting": "top_level"` plus a `note`). `--branch` and `--base` have
+nothing to act on there and are reported back under `ignored`.
+
+So the command always gives the user a working space. Read `nesting` in the summary
+before telling them it landed under the current one.
 
 ## Creating one
 
-`$S` below is the bundled script:
-
 ```bash
-S="${CLAUDE_PLUGIN_ROOT}/scripts/herdr-collab.py"
-
-python3 "$S" child --branch feat/thing --label "the thing"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-collab.py" child \
+  --branch feat/thing --label "the thing"
 ```
+
+Call it by that full path every time, not through a `$S` shorthand — the
+auto-approve hook in `~/.claude/settings.json` matches on the script path.
 
 The common case needs no kind at all — a task alone is enough, and the child comes up
 running the same agent as the session that asked for it:
 
 ```bash
-python3 "$S" child --branch feat/thing --task "port the retry logic to the new client"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/herdr-collab.py" child \
+  --branch feat/thing --task "port the retry logic to the new client"
 ```
 
 Flags, all optional:
@@ -47,11 +55,14 @@ Flags, all optional:
 | `--split` | add a shell pane beside the agent, in the same checkout |
 | `--focus` | switch to the child; default is to leave focus where it is |
 
-Prints a JSON summary — child `workspace`, `branch`, `checkout` path, `root_pane`,
-`shell_pane`, and the `agent` block. Read the ids from it rather than guessing them.
+Prints a JSON summary — new `workspace`, its `nesting`, `cwd`, `root_pane`,
+`shell_pane`, the `agent` block, and `branch` when it nested. Read the ids from it
+rather than guessing them.
 
-**Ask before running it.** It creates a branch and a working copy on disk. Confirm the
-branch name and base with the user unless they already gave both.
+**Don't ask first.** Creating the child is the request, so run it. Pick a branch name
+from the task when the user didn't give one, and say what was created afterwards. Only
+stop to ask when the base ref is genuinely ambiguous — a repo with no clear HEAD to
+branch from, or a user who named a base that doesn't resolve.
 
 ## Choosing the agent
 
@@ -81,6 +92,8 @@ security boundary and the answer is theirs.
 
 ## Cleaning up
 
+A worktree child, by `nesting`:
+
 ```bash
 herdr worktree remove --workspace <child>          # add --force if it has a live agent
 ```
@@ -88,12 +101,18 @@ herdr worktree remove --workspace <child>          # add --force if it has a liv
 That removes the checkout but leaves the branch. Say which of the two the user is asking
 to discard before running anything.
 
+A top-level space has no worktree, so it is just:
+
+```bash
+herdr workspace close <workspace>
+```
+
 ## Notes
 
 - The checkout lands under `worktrees.directory` from `~/.config/herdr/config.toml`
   (`~/.herdr/worktrees` by default), not inside the parent repo.
 - `--split` runs before the agent starts, so a TUI agent launches at its final size
   instead of reflowing its whole buffer when the split arrives.
-- If the agent fails to start for a real reason, the child workspace still exists — the
-  error names it and the command to remove it. Nothing is rolled back automatically,
-  because that would delete a branch and a checkout.
+- If the agent fails to start for a real reason, the workspace still exists — the error
+  names it and the right removal command for how it was created. Nothing is rolled back
+  automatically, because that would delete a branch and a checkout.

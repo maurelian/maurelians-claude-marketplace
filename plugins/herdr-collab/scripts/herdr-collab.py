@@ -134,6 +134,10 @@ def workspace_of(pane_id):
     return herdr_json("pane", "get", pane_id)["pane"]["workspace_id"]
 
 
+def pane_cwd(pane_id):
+    return herdr_json("pane", "get", pane_id)["pane"]["cwd"]
+
+
 def agent_name(*candidates):
     """First candidate herdr will accept: lowercase, [a-z0-9_-], starting with a letter."""
     for candidate in candidates:
@@ -361,7 +365,8 @@ def cmd_child(argv):
 
     herdr only indents worktree children in the sidebar, so a "sub workspace" is always
     a real Git worktree on its own branch — there is no way to nest two unrelated
-    workspaces, and no call that reparents an existing one.
+    workspaces, and no call that reparents an existing one. When the parent is outside
+    a Git work tree, nesting is impossible and this falls back to a top-level space.
     """
     pane_id = agent_pane_id()
     workspace = workspace_of(pane_id)
@@ -388,40 +393,58 @@ def cmd_child(argv):
             args += [name, value]
     args.append("--focus" if focus else "--no-focus")
 
+    nested = True
     try:
         created = herdr_json(*args)
     except Failure as err:
-        if "Git work tree" in str(err):
-            raise Failure(
-                f"workspace {workspace} is not inside a Git work tree, so it cannot "
-                "parent a child — herdr nests worktree children only"
-            ) from err
-        raise
+        if "Git work tree" not in str(err):
+            raise
+        # Nesting needs a worktree, so a parent outside a work tree can never have a
+        # child. A flat space in the same directory still gives the caller what the
+        # rest of this command is for: a new space, its panes, its agent, its task.
+        nested = False
+        flat = ["workspace", "create", "--cwd", pane_cwd(pane_id)]
+        if label:
+            flat += ["--label", label]
+        flat.append("--focus" if focus else "--no-focus")
+        created = herdr_json(*flat)
 
     root = created["root_pane"]["pane_id"]
-    checkout = created["worktree"]["path"]
+    cwd = created["worktree"]["path"] if nested else created["root_pane"]["cwd"]
     summary = {
         "workspace": created["workspace"]["workspace_id"],
         "label": created["workspace"]["label"],
-        "branch": created["worktree"]["branch"],
-        "checkout": checkout,
+        "nesting": "worktree_child" if nested else "top_level",
+        "cwd": cwd,
         "root_pane": root,
         "parent_workspace": workspace,
     }
+    if nested:
+        summary["branch"] = created["worktree"]["branch"]
+    else:
+        summary["note"] = (
+            f"workspace {workspace} is not inside a Git work tree, so herdr cannot nest "
+            "a child under it — created a top-level space in the same directory instead"
+        )
+        stranded = [f for f in ("--branch", "--base") if flag_value(argv, f)]
+        if stranded:
+            summary["ignored"] = (
+                f"{', '.join(stranded)} needs a worktree and was not applied"
+            )
 
     # Split first: a TUI agent launched at its final size avoids the full-buffer reflow
     # that splitting afterwards would force on it.
     if want_split:
         split = herdr_json(
             "pane", "split", root, "--direction", "right",
-            "--ratio", CHILD_SPLIT_RATIO, "--no-focus", "--cwd", checkout,
+            "--ratio", CHILD_SPLIT_RATIO, "--no-focus", "--cwd", cwd,
         )
         summary["shell_pane"] = split["pane"]["pane_id"]
 
     if want_agent:
         # The pane id doubles as an agent target, which sidesteps having to invent a
         # unique agent name just to prompt the thing we already have a handle on.
-        name = agent_name(label, branch, summary["workspace"])
+        name = agent_name(label, summary.get("branch"), summary["workspace"])
         try:
             herdr("agent", "start", name, "--kind", kind, "--pane", root)
         except Failure as err:
@@ -429,12 +452,16 @@ def cmd_child(argv):
             # opens its trust question and `agent start` reports it as not ready. The
             # agent is up and waiting on the user, which is not a failure to create.
             if agent_status(root) is None:
-                # The worktree is already on disk by now. Rolling it back would delete
-                # a real branch and checkout, so report what exists instead.
+                # The space is already there by now. Rolling a worktree back would
+                # delete a real branch and checkout, so report what exists instead.
+                undo = (
+                    f"herdr worktree remove --workspace {summary['workspace']}"
+                    if nested
+                    else f"herdr workspace close {summary['workspace']}"
+                )
                 raise Failure(
-                    f"{err}\nthe child workspace was still created: "
-                    f"{summary['workspace']} at {checkout} — remove it with "
-                    f"`herdr worktree remove --workspace {summary['workspace']}`"
+                    f"{err}\nthe workspace was still created: "
+                    f"{summary['workspace']} at {cwd} — remove it with `{undo}`"
                 ) from err
 
         status = agent_status(root)
