@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shared-pane collaboration between a Claude Code session and its sibling herdr pane.
 
-Subcommands: resolve, child, enable, read, send, wait, status, disable, hook, cleanup.
+Subcommands: resolve, space, enable, read, send, wait, status, disable, hook, cleanup.
 The `hook` subcommand is wired to UserPromptSubmit and injects output the agent
 has not seen yet; it stays silent unless `enable` has written a state file.
 """
@@ -36,7 +36,7 @@ REDRAW_TAIL_LINES = 20
 WAIT_GRACE_SECONDS = 1.0
 WAIT_POLL_SECONDS = 0.3
 WAIT_TIMEOUT_SECONDS = 120.0
-CHILD_SPLIT_RATIO = "0.4"
+SPLIT_RATIO = "0.4"
 
 
 class Failure(Exception):
@@ -164,7 +164,7 @@ def agent_status(pane_id):
 
 
 def own_agent_kind():
-    """Agent kind running this session, so a child defaults to the same kind as its parent."""
+    """Agent kind running this session, so a new space defaults to the same kind."""
     try:
         kind = herdr_json("agent", "get", agent_pane_id())["agent"].get("agent")
     except Failure:
@@ -360,13 +360,13 @@ def cmd_resolve(_argv):
     )
 
 
-def cmd_child(argv):
-    """Create a worktree child of this workspace, optionally with an agent and a shell.
+def cmd_space(argv):
+    """Create a new space, optionally with an agent and a shell.
 
-    herdr only indents worktree children in the sidebar, so a "sub workspace" is always
-    a real Git worktree on its own branch — there is no way to nest two unrelated
-    workspaces, and no call that reparents an existing one. When the parent is outside
-    a Git work tree, nesting is impossible and this falls back to a top-level space.
+    Top-level by default. `--child` (implied by `--branch`/`--base`) nests it under this
+    workspace instead, which herdr only does for worktree children: a real Git worktree
+    on its own branch. Outside a Git work tree nesting is impossible, so a requested
+    child falls back to a top-level space.
     """
     pane_id = agent_pane_id()
     workspace = workspace_of(pane_id)
@@ -374,40 +374,54 @@ def cmd_child(argv):
     branch = flag_value(argv, "--branch")
     base = flag_value(argv, "--base")
     label = flag_value(argv, "--label")
+    cwd = flag_value(argv, "--cwd")
     want_agent, kind = opt_flag(argv, "--agent")
     task = flag_value(argv, "--task")
     want_split = "--split" in argv
     focus = "--focus" in argv
+    want_child = "--child" in argv or bool(branch or base)
 
+    if want_child and cwd:
+        raise Failure("--cwd conflicts with --child: a child's directory is its new worktree")
     # A task is only ever for an agent, so asking for one implies asking for the other.
     if task:
         want_agent = True
-    # Default to whatever is running this session: a child of a Claude session should be
-    # another Claude unless the user says otherwise.
+    # Default to whatever is running this session: a space opened from a Claude session
+    # should run another Claude unless the user says otherwise.
     if want_agent and not kind:
         kind = own_agent_kind()
 
-    args = ["worktree", "create", "--workspace", workspace]
-    for name, value in (("--branch", branch), ("--base", base), ("--label", label)):
-        if value:
-            args += [name, value]
-    args.append("--focus" if focus else "--no-focus")
-
-    nested = True
-    try:
-        created = herdr_json(*args)
-    except Failure as err:
-        if "Git work tree" not in str(err):
-            raise
-        # Nesting needs a worktree, so a parent outside a work tree can never have a
-        # child. A flat space in the same directory still gives the caller what the
-        # rest of this command is for: a new space, its panes, its agent, its task.
-        nested = False
-        flat = ["workspace", "create", "--cwd", pane_cwd(pane_id)]
+    def top_level(directory):
+        flat = ["workspace", "create", "--cwd", directory]
         if label:
             flat += ["--label", label]
         flat.append("--focus" if focus else "--no-focus")
-        created = herdr_json(*flat)
+        return herdr_json(*flat)
+
+    nested = False
+    note = None
+    if want_child:
+        args = ["worktree", "create", "--workspace", workspace]
+        for name, value in (("--branch", branch), ("--base", base), ("--label", label)):
+            if value:
+                args += [name, value]
+        args.append("--focus" if focus else "--no-focus")
+        try:
+            created = herdr_json(*args)
+            nested = True
+        except Failure as err:
+            if "Git work tree" not in str(err):
+                raise
+            note = (
+                f"workspace {workspace} is not inside a Git work tree, so herdr cannot "
+                "nest a child under it — created a top-level space in the same "
+                "directory instead"
+            )
+            created = top_level(pane_cwd(pane_id))
+    else:
+        created = top_level(
+            os.path.abspath(os.path.expanduser(cwd)) if cwd else pane_cwd(pane_id)
+        )
 
     root = created["root_pane"]["pane_id"]
     cwd = created["worktree"]["path"] if nested else created["root_pane"]["cwd"]
@@ -417,15 +431,12 @@ def cmd_child(argv):
         "nesting": "worktree_child" if nested else "top_level",
         "cwd": cwd,
         "root_pane": root,
-        "parent_workspace": workspace,
     }
     if nested:
+        summary["parent_workspace"] = workspace
         summary["branch"] = created["worktree"]["branch"]
-    else:
-        summary["note"] = (
-            f"workspace {workspace} is not inside a Git work tree, so herdr cannot nest "
-            "a child under it — created a top-level space in the same directory instead"
-        )
+    if note:
+        summary["note"] = note
         stranded = [f for f in ("--branch", "--base") if flag_value(argv, f)]
         if stranded:
             summary["ignored"] = (
@@ -437,7 +448,7 @@ def cmd_child(argv):
     if want_split:
         split = herdr_json(
             "pane", "split", root, "--direction", "right",
-            "--ratio", CHILD_SPLIT_RATIO, "--no-focus", "--cwd", cwd,
+            "--ratio", SPLIT_RATIO, "--no-focus", "--cwd", cwd,
         )
         summary["shell_pane"] = split["pane"]["pane_id"]
 
@@ -629,7 +640,7 @@ def emit(context):
 
 COMMANDS = {
     "resolve": cmd_resolve,
-    "child": cmd_child,
+    "space": cmd_space,
     "enable": cmd_enable,
     "read": cmd_read,
     "send": cmd_send,
