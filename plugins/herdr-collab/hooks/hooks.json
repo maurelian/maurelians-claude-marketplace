@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/herdr-collab.py\" label",
+            "command": "S=\"${CLAUDE_PLUGIN_ROOT}/scripts/herdr-collab.py\"; [ -f \"$S\" ] || exit 0; python3 \"$S\" label",
             "timeout": 5
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/herdr-collab.py\" hook",
+            "command": "S=\"${CLAUDE_PLUGIN_ROOT}/scripts/herdr-collab.py\"; [ -f \"$S\" ] || exit 0; python3 \"$S\" hook",
             "timeout": 5
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/herdr-collab.py\" cleanup",
+            "command": "S=\"${CLAUDE_PLUGIN_ROOT}/scripts/herdr-collab.py\"; [ -f \"$S\" ] || exit 0; python3 \"$S\" cleanup",
             "timeout": 5
           }
         ]
