@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Shared-pane collaboration between a Claude Code session and its sibling herdr pane.
 
-Subcommands: resolve, space, enable, read, send, wait, status, disable, hook, cleanup.
+Subcommands: resolve, space, enable, read, send, wait, status, disable, hook, label,
+cleanup.
 The `hook` subcommand is wired to UserPromptSubmit and injects output the agent
 has not seen yet; it stays silent unless `enable` has written a state file.
 """
@@ -37,6 +38,8 @@ WAIT_GRACE_SECONDS = 1.0
 WAIT_POLL_SECONDS = 0.3
 WAIT_TIMEOUT_SECONDS = 120.0
 SPLIT_RATIO = "0.4"
+LABEL_SOURCE = "herdr-collab"
+SESSION_ID_CHARS = 8
 
 
 class Failure(Exception):
@@ -593,10 +596,27 @@ def cmd_disable(_argv):
     print(f"shared-pane collaboration disabled for {pane_id}")
 
 
+def cmd_label(_argv):
+    """SessionStart: show a short session id on this pane's border and sidebar row."""
+    session = json.load(sys.stdin).get("session_id")
+    pane = os.environ.get("HERDR_PANE_ID")
+    if not (pane and session):
+        return
+    # --agent guards the label so it vanishes once claude is no longer in the pane.
+    herdr(
+        "pane", "report-metadata", pane, "--source", LABEL_SOURCE, "--agent", "claude",
+        "--display-agent", f"claude · {session[:SESSION_ID_CHARS]}",
+    )
+
+
 def cmd_cleanup(_argv):
     pane = os.environ.get("HERDR_PANE_ID")
     if pane:
         clear_state(pane)
+        herdr(
+            "pane", "report-metadata", pane, "--source", LABEL_SOURCE,
+            "--clear-display-agent",
+        )
 
 
 def cmd_hook(_argv):
@@ -648,6 +668,7 @@ COMMANDS = {
     "status": cmd_status,
     "disable": cmd_disable,
     "hook": cmd_hook,
+    "label": cmd_label,
     "cleanup": cmd_cleanup,
 }
 
@@ -658,7 +679,7 @@ def main():
         print(f"usage: herdr-collab.py {{{'|'.join(COMMANDS)}}}", file=sys.stderr)
         return 2
     name, rest = argv[0], argv[1:]
-    silent = name in ("hook", "cleanup")
+    silent = name in ("hook", "label", "cleanup")
     try:
         COMMANDS[name](rest)
     except Exception as err:  # noqa: BLE001 - hooks must never break the prompt
