@@ -27,7 +27,7 @@ current branch). Fix what you can, ask before rewriting history or posting anyth
    diff. Propose a regrouping if needed (back up the branch first, keep the final tree
    identical, `--force-with-lease=<branch>:<old-sha>`). Isolate mechanical churn such
    as formatter output in its own commit.
-2. **Self-review before requesting review.** Spawn a subagent with `model: "opus"`
+2. **Self-review before requesting review.** Spawn a subagent with `model: "fable"`
    to review the PR diff against the principles above and for correctness. It must
    return numbered comments, each with a link to the location in the PR diff view:
    `https://github.com/<owner>/<repo>/pull/<n>/files#diff-<sha256 of path>R<line>`
