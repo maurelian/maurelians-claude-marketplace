@@ -76,12 +76,16 @@ window went by between two reads and the earlier part no longer exists anywhere.
 before drawing conclusions, and ask the user to re-run into a file if the missing part
 matters. Never present a truncated log as the whole story.
 
-**If it carries `note: the pane was resized`,** the user changed the pane's width, which
-reflows every line and loses the text anchor. Nothing was lost — the block just repeats
-content already seen, so re-read it rather than reacting to it as new.
+**If it says `pane shows <app> full-screen`,** the user is in vim, less, lazygit or
+similar. Its screen is left out because every redraw would read as new; the note comes
+once, and the shell's output resumes when the app exits. If what's on that screen
+matters, ask the user or `herdr pane read` it yourself.
 
-Blocks are capped at 200 lines to keep the context sane; every delta is appended in full
-to `~/.claude/state/herdr-collab/<pane>.log`, so read that when the trimmed head matters.
+Resizing the pane rewraps every line; only lines the previous view lacked come through.
+
+Blocks keep the newest 40 lines; a `[…N earlier lines trimmed…]` line names the log
+(`~/.claude/state/herdr-collab/<pane>.log`) that holds every delta in full. Read it when
+the trimmed head matters.
 
 One known blind spot: a command whose output is byte-identical to what already filled the
 window reads as "nothing new", because the cursor is a text diff and herdr's read API
