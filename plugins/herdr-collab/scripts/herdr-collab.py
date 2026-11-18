@@ -22,18 +22,13 @@ STATE_DIR = os.path.join(
 )
 READ_SOURCE = "recent-unwrapped"
 READ_LINES = "2000"
-MAX_DELTA_LINES = 200
-MAX_DELTA_CHARS = 8000
+MAX_DELTA_LINES = 40
+MAX_DELTA_CHARS = 4000
 STALE_AFTER_SECONDS = 12 * 60 * 60
 OVERFLOW_WARNING = (
     "⚠ output overflowed herdr's snapshot window — earlier lines are lost "
     "and cannot be recovered"
 )
-REDRAW_NOTICE = (
-    "note: the pane was resized, which reflows every line and loses the anchor. "
-    "Nothing was lost; this is the current view, most of it already seen"
-)
-REDRAW_TAIL_LINES = 20
 WAIT_GRACE_SECONDS = 1.0
 WAIT_POLL_SECONDS = 0.3
 WAIT_TIMEOUT_SECONDS = 120.0
@@ -252,17 +247,51 @@ def delta(prev, new):
     return new, True
 
 
-def truncate(lines):
+def seen_prefix(prev, new):
+    """How many leading lines of `new` the previous view already held, ignoring how they wrap.
+
+    A resize rewraps every line, so `delta` finds no overlap; comparing the text with all
+    whitespace removed still recognises it. Containment only shrinks as the prefix grows,
+    so the longest one is found by bisection.
+    """
+    squash = lambda lines: "".join("".join(lines).split())
+    seen = squash(prev[:-1])
+    low, high = 0, len(new)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if squash(new[:mid]) in seen:
+            low = mid
+        else:
+            high = mid - 1
+    return low
+
+
+def fullscreen_app(pane, lines):
+    """The program filling the pane's alternate screen (vim, less, lazygit…), else None.
+
+    The alternate screen has no scrollback, so herdr reports none for it; a shell at its
+    prompt never counts, and neither does a program whose output just hasn't filled the
+    screen yet.
+    """
+    scroll = pane.get("scroll") or {}
+    if scroll.get("max_offset_from_bottom", 1) != 0:
+        return None
+    if len(lines) < scroll.get("viewport_rows", 0) - 1:
+        return None
+    command = foreground_command(pane["pane_id"])
+    return command.split()[0].rsplit("/", 1)[-1] if command else None
+
+
+def truncate(lines, log=None):
     """Trim from the head so the tail — the most recent output — always survives."""
-    truncated = False
+    total = len(lines)
     if len(lines) > MAX_DELTA_LINES:
         lines = lines[-MAX_DELTA_LINES:]
-        truncated = True
     while lines and len("\n".join(lines)) > MAX_DELTA_CHARS:
         lines = lines[1:]
-        truncated = True
-    if truncated:
-        lines = ["[…earlier lines trimmed; see the herdr-collab log…]"] + lines
+    if len(lines) < total:
+        where = f"; they are in {log}" if log else ""
+        lines = [f"[…{total - len(lines)} earlier lines trimmed{where}…]"] + lines
     return lines
 
 
@@ -277,10 +306,8 @@ def append_log(pane_id, lines):
         pass
 
 
-def render(shared, lines, notice):
-    body = "\n".join(truncate(lines))
-    if notice:
-        body = notice + "\n" + body
+def render(shared, lines, notice, log):
+    body = "\n".join(([notice] if notice else []) + truncate(lines, log))
     return (
         f'<herdr-shared-pane pane="{shared["pane_id"]}" cwd="{shared.get("cwd", "")}">\n'
         f"{body}\n"
@@ -292,16 +319,24 @@ def collect(state, shared):
     """Delta since the last read, advancing the stored cursor."""
     pane_id = shared["pane_id"]
     lines = snapshot(pane_id)
+    app = fullscreen_app(shared, lines)
+    if app:
+        # Its screen is redrawn wholesale, so every read would look new. Say so once and
+        # keep the cursor on the shell's view, which comes back when the app exits.
+        notice = None if state.get("fullscreen") == app else f"pane shows {app} full-screen; its screen is left out"
+        state["fullscreen"] = app
+        save_state(state)
+        return [], notice
+    state.pop("fullscreen", None)
     width = pane_width(pane_id)
-    new_lines, missed = delta(state.get("snapshot") or [], lines)
+    prev = state.get("snapshot") or []
+    new_lines, missed = delta(prev, lines)
     notice = None
     if missed:
         # A resize reflows the whole pane, so losing the anchor says nothing about
-        # whether output was actually lost. Re-showing the whole view would be noise,
-        # but the tail still carries anything that ran alongside the resize.
+        # whether output was actually lost; only what the old view lacked is new.
         if width != state.get("width"):
-            notice = REDRAW_NOTICE
-            new_lines = new_lines[-REDRAW_TAIL_LINES:]
+            new_lines = lines[seen_prefix(prev, lines):]
         else:
             notice = OVERFLOW_WARNING
     state["snapshot"] = lines
@@ -538,7 +573,7 @@ def cmd_read(_argv):
     state = require_enabled(pane_id)
     shared = resolve_shared(state)
     lines, notice = collect(state, shared)
-    print(render(shared, lines, notice) if lines else "no new output")
+    print(render(shared, lines, notice, log_path(pane_id)) if lines or notice else "no new output")
 
 
 def cmd_wait(argv):
@@ -641,8 +676,8 @@ def cmd_hook(_argv):
         )
         return
     lines, notice = collect(state, shared)
-    if lines:
-        emit(render(shared, lines, notice))
+    if lines or notice:
+        emit(render(shared, lines, notice, log_path(pane_id)))
 
 
 def emit(context):
